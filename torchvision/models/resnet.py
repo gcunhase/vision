@@ -11,6 +11,8 @@ from ._api import register_model, Weights, WeightsEnum
 from ._meta import _IMAGENET_CATEGORIES
 from ._utils import _ovewrite_named_param, handle_legacy_interface
 
+from pytorch_quantization import nn as quant_nn
+
 
 __all__ = [
     "ResNet",
@@ -69,6 +71,7 @@ class BasicBlock(nn.Module):
         base_width: int = 64,
         dilation: int = 1,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
+        quantize: bool = False
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -85,6 +88,9 @@ class BasicBlock(nn.Module):
         self.bn2 = norm_layer(planes)
         self.downsample = downsample
         self.stride = stride
+        self._quantize = quantize
+        if self._quantize:
+            self.residual_quantizer = quant_nn.TensorQuantizer(quant_nn.QuantConv2d.default_quant_desc_input)
 
     def forward(self, x: Tensor) -> Tensor:
         identity = x
@@ -99,7 +105,10 @@ class BasicBlock(nn.Module):
         if self.downsample is not None:
             identity = self.downsample(x)
 
-        out += identity
+        if self._quantize:
+            out += self.residual_quantizer(identity)
+        else:
+            out += identity
         out = self.relu(out)
 
         return out
@@ -108,7 +117,7 @@ class BasicBlock(nn.Module):
 class Bottleneck(nn.Module):
     # Bottleneck in torchvision places the stride for downsampling at 3x3 convolution(self.conv2)
     # while original implementation places the stride at the first 1x1 convolution(self.conv1)
-    # according to "Deep residual learning for image recognition" https://arxiv.org/abs/1512.03385.
+    # according to "Deep residual learning for image recognition"https://arxiv.org/abs/1512.03385.
     # This variant is also known as ResNet V1.5 and improves accuracy according to
     # https://ngc.nvidia.com/catalog/model-scripts/nvidia:resnet_50_v1_5_for_pytorch.
 
@@ -124,6 +133,7 @@ class Bottleneck(nn.Module):
         base_width: int = 64,
         dilation: int = 1,
         norm_layer: Optional[Callable[..., nn.Module]] = None,
+        quantize: bool = False
     ) -> None:
         super().__init__()
         if norm_layer is None:
@@ -139,6 +149,9 @@ class Bottleneck(nn.Module):
         self.relu = nn.ReLU(inplace=True)
         self.downsample = downsample
         self.stride = stride
+        self._quantize = quantize
+        if self._quantize:
+            self.residual_quantizer = quant_nn.TensorQuantizer(quant_nn.QuantConv2d.default_quant_desc_input)
 
     def forward(self, x: Tensor) -> Tensor:
         identity = x
@@ -157,7 +170,10 @@ class Bottleneck(nn.Module):
         if self.downsample is not None:
             identity = self.downsample(x)
 
-        out += identity
+        if self._quantize:
+            out += self.residual_quantizer(identity)
+        else:
+            out += identity
         out = self.relu(out)
 
         return out
@@ -168,6 +184,7 @@ class ResNet(nn.Module):
         self,
         block: Type[Union[BasicBlock, Bottleneck]],
         layers: List[int],
+        quantize: bool = False,
         num_classes: int = 1000,
         zero_init_residual: bool = False,
         groups: int = 1,
@@ -176,6 +193,8 @@ class ResNet(nn.Module):
         norm_layer: Optional[Callable[..., nn.Module]] = None,
     ) -> None:
         super().__init__()
+        self._quantize = quantize
+
         _log_api_usage_once(self)
         if norm_layer is None:
             norm_layer = nn.BatchNorm2d
@@ -245,7 +264,8 @@ class ResNet(nn.Module):
         layers = []
         layers.append(
             block(
-                self.inplanes, planes, stride, downsample, self.groups, self.base_width, previous_dilation, norm_layer
+                self.inplanes, planes, stride, downsample, self.groups, self.base_width, previous_dilation,
+                norm_layer, quantize=self._quantize
             )
         )
         self.inplanes = planes * block.expansion
@@ -258,6 +278,7 @@ class ResNet(nn.Module):
                     base_width=self.base_width,
                     dilation=self.dilation,
                     norm_layer=norm_layer,
+                    quantize=self._quantize
                 )
             )
 
@@ -290,11 +311,13 @@ def _resnet(
     layers: List[int],
     weights: Optional[WeightsEnum],
     progress: bool,
+    quantize: bool,
     **kwargs: Any,
 ) -> ResNet:
     if weights is not None:
         _ovewrite_named_param(kwargs, "num_classes", len(weights.meta["categories"]))
 
+    kwargs.update({"quantize": quantize})
     model = ResNet(block, layers, **kwargs)
 
     if weights is not None:
@@ -681,7 +704,7 @@ class Wide_ResNet101_2_Weights(WeightsEnum):
 
 @register_model()
 @handle_legacy_interface(weights=("pretrained", ResNet18_Weights.IMAGENET1K_V1))
-def resnet18(*, weights: Optional[ResNet18_Weights] = None, progress: bool = True, **kwargs: Any) -> ResNet:
+def resnet18(*, weights: Optional[ResNet18_Weights] = None, progress: bool = True, quantize: bool = False, **kwargs: Any) -> ResNet:
     """ResNet-18 from `Deep Residual Learning for Image Recognition <https://arxiv.org/pdf/1512.03385.pdf>`__.
 
     Args:
@@ -692,6 +715,7 @@ def resnet18(*, weights: Optional[ResNet18_Weights] = None, progress: bool = Tru
             weights are used.
         progress (bool, optional): If True, displays a progress bar of the
             download to stderr. Default is True.
+        quantize (bool, optional): If True, quantizes residual branches. Default is False.
         **kwargs: parameters passed to the ``torchvision.models.resnet.ResNet``
             base class. Please refer to the `source code
             <https://github.com/pytorch/vision/blob/main/torchvision/models/resnet.py>`_
@@ -702,12 +726,12 @@ def resnet18(*, weights: Optional[ResNet18_Weights] = None, progress: bool = Tru
     """
     weights = ResNet18_Weights.verify(weights)
 
-    return _resnet(BasicBlock, [2, 2, 2, 2], weights, progress, **kwargs)
+    return _resnet(BasicBlock, [2, 2, 2, 2], weights, progress, quantize, **kwargs)
 
 
 @register_model()
 @handle_legacy_interface(weights=("pretrained", ResNet34_Weights.IMAGENET1K_V1))
-def resnet34(*, weights: Optional[ResNet34_Weights] = None, progress: bool = True, **kwargs: Any) -> ResNet:
+def resnet34(*, weights: Optional[ResNet34_Weights] = None, progress: bool = True, quantize: bool = False, **kwargs: Any) -> ResNet:
     """ResNet-34 from `Deep Residual Learning for Image Recognition <https://arxiv.org/pdf/1512.03385.pdf>`__.
 
     Args:
@@ -718,6 +742,7 @@ def resnet34(*, weights: Optional[ResNet34_Weights] = None, progress: bool = Tru
             weights are used.
         progress (bool, optional): If True, displays a progress bar of the
             download to stderr. Default is True.
+        quantize (bool, optional): If True, quantizes residual branches. Default is False.
         **kwargs: parameters passed to the ``torchvision.models.resnet.ResNet``
             base class. Please refer to the `source code
             <https://github.com/pytorch/vision/blob/main/torchvision/models/resnet.py>`_
@@ -728,12 +753,12 @@ def resnet34(*, weights: Optional[ResNet34_Weights] = None, progress: bool = Tru
     """
     weights = ResNet34_Weights.verify(weights)
 
-    return _resnet(BasicBlock, [3, 4, 6, 3], weights, progress, **kwargs)
+    return _resnet(BasicBlock, [3, 4, 6, 3], weights, progress, quantize, **kwargs)
 
 
 @register_model()
 @handle_legacy_interface(weights=("pretrained", ResNet50_Weights.IMAGENET1K_V1))
-def resnet50(*, weights: Optional[ResNet50_Weights] = None, progress: bool = True, **kwargs: Any) -> ResNet:
+def resnet50(*, weights: Optional[ResNet50_Weights] = None, progress: bool = True, quantize: bool = False, **kwargs: Any) -> ResNet:
     """ResNet-50 from `Deep Residual Learning for Image Recognition <https://arxiv.org/pdf/1512.03385.pdf>`__.
 
     .. note::
@@ -750,6 +775,7 @@ def resnet50(*, weights: Optional[ResNet50_Weights] = None, progress: bool = Tru
             weights are used.
         progress (bool, optional): If True, displays a progress bar of the
             download to stderr. Default is True.
+        quantize (bool, optional): If True, quantizes residual branches. Default is False.
         **kwargs: parameters passed to the ``torchvision.models.resnet.ResNet``
             base class. Please refer to the `source code
             <https://github.com/pytorch/vision/blob/main/torchvision/models/resnet.py>`_
@@ -760,12 +786,12 @@ def resnet50(*, weights: Optional[ResNet50_Weights] = None, progress: bool = Tru
     """
     weights = ResNet50_Weights.verify(weights)
 
-    return _resnet(Bottleneck, [3, 4, 6, 3], weights, progress, **kwargs)
+    return _resnet(Bottleneck, [3, 4, 6, 3], weights, progress, quantize, **kwargs)
 
 
 @register_model()
 @handle_legacy_interface(weights=("pretrained", ResNet101_Weights.IMAGENET1K_V1))
-def resnet101(*, weights: Optional[ResNet101_Weights] = None, progress: bool = True, **kwargs: Any) -> ResNet:
+def resnet101(*, weights: Optional[ResNet101_Weights] = None, progress: bool = True, quantize: bool = False, **kwargs: Any) -> ResNet:
     """ResNet-101 from `Deep Residual Learning for Image Recognition <https://arxiv.org/pdf/1512.03385.pdf>`__.
 
     .. note::
@@ -782,6 +808,7 @@ def resnet101(*, weights: Optional[ResNet101_Weights] = None, progress: bool = T
             weights are used.
         progress (bool, optional): If True, displays a progress bar of the
             download to stderr. Default is True.
+        quantize (bool, optional): If True, quantizes residual branches. Default is False.
         **kwargs: parameters passed to the ``torchvision.models.resnet.ResNet``
             base class. Please refer to the `source code
             <https://github.com/pytorch/vision/blob/main/torchvision/models/resnet.py>`_
@@ -792,12 +819,12 @@ def resnet101(*, weights: Optional[ResNet101_Weights] = None, progress: bool = T
     """
     weights = ResNet101_Weights.verify(weights)
 
-    return _resnet(Bottleneck, [3, 4, 23, 3], weights, progress, **kwargs)
+    return _resnet(Bottleneck, [3, 4, 23, 3], weights, progress, quantize, **kwargs)
 
 
 @register_model()
 @handle_legacy_interface(weights=("pretrained", ResNet152_Weights.IMAGENET1K_V1))
-def resnet152(*, weights: Optional[ResNet152_Weights] = None, progress: bool = True, **kwargs: Any) -> ResNet:
+def resnet152(*, weights: Optional[ResNet152_Weights] = None, progress: bool = True, quantize: bool = False, **kwargs: Any) -> ResNet:
     """ResNet-152 from `Deep Residual Learning for Image Recognition <https://arxiv.org/pdf/1512.03385.pdf>`__.
 
     .. note::
@@ -814,6 +841,7 @@ def resnet152(*, weights: Optional[ResNet152_Weights] = None, progress: bool = T
             weights are used.
         progress (bool, optional): If True, displays a progress bar of the
             download to stderr. Default is True.
+        quantize (bool, optional): If True, quantizes residual branches. Default is False.
         **kwargs: parameters passed to the ``torchvision.models.resnet.ResNet``
             base class. Please refer to the `source code
             <https://github.com/pytorch/vision/blob/main/torchvision/models/resnet.py>`_
@@ -824,13 +852,13 @@ def resnet152(*, weights: Optional[ResNet152_Weights] = None, progress: bool = T
     """
     weights = ResNet152_Weights.verify(weights)
 
-    return _resnet(Bottleneck, [3, 8, 36, 3], weights, progress, **kwargs)
+    return _resnet(Bottleneck, [3, 8, 36, 3], weights, progress, quantize, **kwargs)
 
 
 @register_model()
 @handle_legacy_interface(weights=("pretrained", ResNeXt50_32X4D_Weights.IMAGENET1K_V1))
 def resnext50_32x4d(
-    *, weights: Optional[ResNeXt50_32X4D_Weights] = None, progress: bool = True, **kwargs: Any
+    *, weights: Optional[ResNeXt50_32X4D_Weights] = None, progress: bool = True, quantize: bool = False, **kwargs: Any
 ) -> ResNet:
     """ResNeXt-50 32x4d model from
     `Aggregated Residual Transformation for Deep Neural Networks <https://arxiv.org/abs/1611.05431>`_.
@@ -843,6 +871,7 @@ def resnext50_32x4d(
             weights are used.
         progress (bool, optional): If True, displays a progress bar of the
             download to stderr. Default is True.
+        quantize (bool, optional): If True, quantizes residual branches. Default is False.
         **kwargs: parameters passed to the ``torchvision.models.resnet.ResNet``
             base class. Please refer to the `source code
             <https://github.com/pytorch/vision/blob/main/torchvision/models/resnet.py>`_
@@ -854,13 +883,13 @@ def resnext50_32x4d(
 
     _ovewrite_named_param(kwargs, "groups", 32)
     _ovewrite_named_param(kwargs, "width_per_group", 4)
-    return _resnet(Bottleneck, [3, 4, 6, 3], weights, progress, **kwargs)
+    return _resnet(Bottleneck, [3, 4, 6, 3], weights, progress, quantize, **kwargs)
 
 
 @register_model()
 @handle_legacy_interface(weights=("pretrained", ResNeXt101_32X8D_Weights.IMAGENET1K_V1))
 def resnext101_32x8d(
-    *, weights: Optional[ResNeXt101_32X8D_Weights] = None, progress: bool = True, **kwargs: Any
+    *, weights: Optional[ResNeXt101_32X8D_Weights] = None, progress: bool = True, quantize: bool = False, **kwargs: Any
 ) -> ResNet:
     """ResNeXt-101 32x8d model from
     `Aggregated Residual Transformation for Deep Neural Networks <https://arxiv.org/abs/1611.05431>`_.
@@ -873,6 +902,7 @@ def resnext101_32x8d(
             weights are used.
         progress (bool, optional): If True, displays a progress bar of the
             download to stderr. Default is True.
+        quantize (bool, optional): If True, quantizes residual branches. Default is False.
         **kwargs: parameters passed to the ``torchvision.models.resnet.ResNet``
             base class. Please refer to the `source code
             <https://github.com/pytorch/vision/blob/main/torchvision/models/resnet.py>`_
@@ -884,13 +914,13 @@ def resnext101_32x8d(
 
     _ovewrite_named_param(kwargs, "groups", 32)
     _ovewrite_named_param(kwargs, "width_per_group", 8)
-    return _resnet(Bottleneck, [3, 4, 23, 3], weights, progress, **kwargs)
+    return _resnet(Bottleneck, [3, 4, 23, 3], weights, progress, quantize, **kwargs)
 
 
 @register_model()
 @handle_legacy_interface(weights=("pretrained", ResNeXt101_64X4D_Weights.IMAGENET1K_V1))
 def resnext101_64x4d(
-    *, weights: Optional[ResNeXt101_64X4D_Weights] = None, progress: bool = True, **kwargs: Any
+    *, weights: Optional[ResNeXt101_64X4D_Weights] = None, progress: bool = True, quantize: bool = False, **kwargs: Any
 ) -> ResNet:
     """ResNeXt-101 64x4d model from
     `Aggregated Residual Transformation for Deep Neural Networks <https://arxiv.org/abs/1611.05431>`_.
@@ -903,6 +933,7 @@ def resnext101_64x4d(
             weights are used.
         progress (bool, optional): If True, displays a progress bar of the
             download to stderr. Default is True.
+        quantize (bool, optional): If True, quantizes residual branches. Default is False.
         **kwargs: parameters passed to the ``torchvision.models.resnet.ResNet``
             base class. Please refer to the `source code
             <https://github.com/pytorch/vision/blob/main/torchvision/models/resnet.py>`_
@@ -914,13 +945,13 @@ def resnext101_64x4d(
 
     _ovewrite_named_param(kwargs, "groups", 64)
     _ovewrite_named_param(kwargs, "width_per_group", 4)
-    return _resnet(Bottleneck, [3, 4, 23, 3], weights, progress, **kwargs)
+    return _resnet(Bottleneck, [3, 4, 23, 3], weights, progress, quantize, **kwargs)
 
 
 @register_model()
 @handle_legacy_interface(weights=("pretrained", Wide_ResNet50_2_Weights.IMAGENET1K_V1))
 def wide_resnet50_2(
-    *, weights: Optional[Wide_ResNet50_2_Weights] = None, progress: bool = True, **kwargs: Any
+    *, weights: Optional[Wide_ResNet50_2_Weights] = None, progress: bool = True, quantize: bool = False, **kwargs: Any
 ) -> ResNet:
     """Wide ResNet-50-2 model from
     `Wide Residual Networks <https://arxiv.org/abs/1605.07146>`_.
@@ -938,6 +969,7 @@ def wide_resnet50_2(
             weights are used.
         progress (bool, optional): If True, displays a progress bar of the
             download to stderr. Default is True.
+        quantize (bool, optional): If True, quantizes residual branches. Default is False.
         **kwargs: parameters passed to the ``torchvision.models.resnet.ResNet``
             base class. Please refer to the `source code
             <https://github.com/pytorch/vision/blob/main/torchvision/models/resnet.py>`_
@@ -948,13 +980,13 @@ def wide_resnet50_2(
     weights = Wide_ResNet50_2_Weights.verify(weights)
 
     _ovewrite_named_param(kwargs, "width_per_group", 64 * 2)
-    return _resnet(Bottleneck, [3, 4, 6, 3], weights, progress, **kwargs)
+    return _resnet(Bottleneck, [3, 4, 6, 3], weights, progress, quantize, **kwargs)
 
 
 @register_model()
 @handle_legacy_interface(weights=("pretrained", Wide_ResNet101_2_Weights.IMAGENET1K_V1))
 def wide_resnet101_2(
-    *, weights: Optional[Wide_ResNet101_2_Weights] = None, progress: bool = True, **kwargs: Any
+    *, weights: Optional[Wide_ResNet101_2_Weights] = None, progress: bool = True, quantize: bool = False, **kwargs: Any
 ) -> ResNet:
     """Wide ResNet-101-2 model from
     `Wide Residual Networks <https://arxiv.org/abs/1605.07146>`_.
@@ -972,6 +1004,7 @@ def wide_resnet101_2(
             weights are used.
         progress (bool, optional): If True, displays a progress bar of the
             download to stderr. Default is True.
+        quantize (bool, optional): If True, quantizes residual branches. Default is False.
         **kwargs: parameters passed to the ``torchvision.models.resnet.ResNet``
             base class. Please refer to the `source code
             <https://github.com/pytorch/vision/blob/main/torchvision/models/resnet.py>`_
@@ -982,4 +1015,4 @@ def wide_resnet101_2(
     weights = Wide_ResNet101_2_Weights.verify(weights)
 
     _ovewrite_named_param(kwargs, "width_per_group", 64 * 2)
-    return _resnet(Bottleneck, [3, 4, 23, 3], weights, progress, **kwargs)
+    return _resnet(Bottleneck, [3, 4, 23, 3], weights, progress, quantize, **kwargs)
